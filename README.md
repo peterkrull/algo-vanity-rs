@@ -1,11 +1,11 @@
 # Algorand Vanity Address Generator
 
-This command-line interface (CLI) tool is guaranteed the fastest tool to get you exactly the vanity address you want. 
+This command-line interface (CLI) tool is the fastest tool to get you exactly the vanity address you want. 
 
 Features include
 - Multi-threading, number of threads customizable by user
 - Search for one or more patterns at minimal performance penalty
-- Continuous or Stop-after-first-find generation
+- Unlimited or once-per-pattern searching
 - Automatically saves matching addresses to `vanities.json` file
 
 # Usage
@@ -15,8 +15,8 @@ By default the tool will run indefinitely until interrupted by the user, automat
 
 ## Build from source
 
-To build from source you will need the [Rust toolchain](https://rustup.rs/). Clone this repository, and run `cargo build --release` to compile an executable binary file. This may take a few minutes. The binary will be located in `./target/release/algo-vanity-rs`.
+To build from source you will need the [Rust toolchain](https://rustup.rs/). Clone this repository, and run `cargo build --release` to compile an executable binary file. This may take a few minutes. The binary `algo-vanity-rs` will be located in `./target/release/`.
 
 ## Download pre-compiled binaries
-For safety-reasons, it is recommended to build from source. However, pre-build binaries for x64 Linux and Windows platforms are provided under the `Releases` section of the repository.
+For safety-reasons, it is recommended to build from source. However, pre-build binaries for x64 Linux and Windows platforms are provided under the `Releases` section of the repository. These releases are not guaranteed to be up to date.
 
