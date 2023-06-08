@@ -2,6 +2,8 @@ use std::{
     thread,
     fs::File,
     io::Write,
+    fmt::Display,
+    num::NonZeroUsize,
     time::{Instant, Duration},
     sync::{Arc,mpsc,atomic::{AtomicBool, Ordering}},
 };
@@ -13,64 +15,85 @@ use serde::{Serialize,Deserialize};
 use algo_rust_sdk::account::Account;
 
 /// Number of per-thread account checks between notifying main thread
-const COUNT_INTERVAL : usize = 10_000;
+const COUNT_INTERVAL: usize = 10_000;
 
-/// File path to save vanity addresses to
-const DEFAULT_PATH : &str = "./vanities.json";
+/// Default file path to save vanity addresses to
+const DEFAULT_PATH: &str = "./vanities.json";
 
-/// Command line arguments
+// Maximum number of threads before stopping user
+const MAX_THREADS: usize = 128;
+
+// Default number of threads if auto detect fails
+const DEFAULT_THREADS: usize = 4;
+
+// Command line arguments.
 #[derive(Parser,Debug)]
 struct Cli {
-    /// Number of threads
-    #[clap(short, long, default_value_t = 0)]
-    threads: usize,
-
-    /// Where to look for vanity: { start , anywhere, end }
-    #[clap(short, long)]
-    location: Vec<String>,
-
-    /// Exit after finding each vanity once
-    #[clap(short, long, default_value_t = false)]
-    once: bool,
-
-    /// List of vanity strings to search for
+    /// Vanity strings to search for (or json file path)
     #[clap(num_args = 1..,required = true)]
     vanities: Vec<String>,
+
+    /// Number of threads (auto detects by default)
+    #[clap(short, long)]
+    threads: Option<usize>,
+
+    /// Look for match at start of address (default)
+    #[clap(short, long,default_value_t = false)]
+    start: bool,
+
+    /// Look for match anywhere in address
+    #[clap(short, long,default_value_t = false)]
+    anywhere: bool,
+
+    /// Look for match at end of address
+    #[clap(short, long,default_value_t = false)]
+    end: bool,
+    
+    /// File path for saving vanity addresses
+    #[clap(short, long)]
+    path: Option<String>,
+    
+    /// Exit after finding each vanity pattern once
+    #[clap(short, long, default_value_t = false)]
+    once: bool
 }
 
 fn main() {
 
     let mut args = Cli::parse();
 
-    if args.threads > 128 {
-        println!("{} threads seems a bit excessive. Perhaps fewer could do?",args.threads);
-        return;
+    if let Some(t) = args.threads {
+        if t > MAX_THREADS {
+            println!("{t} threads seems a bit excessive. Perhaps fewer could do?");
+            return;
+        }
     }
 
     // Determine number of threads to use, print to user
-    if args.threads == 0 {
-        if let Ok(num_threads) = thread::available_parallelism() {
-            println!("Detected {num_threads} threads automatically");
-            args.threads = num_threads.into();
-        } else {
-            println!("Unable to detect number of cpu threads, defaulting to 4");
-            println!("Please use the -t or --threads flag to set number of threads");
-            args.threads = 4;
-        }
-    } else {
-        println!("\nRunning on {} threads",args.threads);
-    }
+    let num_threads = args.threads.unwrap_or_else(||{
+        thread::available_parallelism().unwrap_or_else(|_e|{
+            NonZeroUsize::new(DEFAULT_THREADS).expect("You may perceive this error as a threat")
+        }).get()
+    });
+    println!("Running on {num_threads} threads");
+
+    // Default to searching in start if nothing is    
+    let path = args.path.unwrap_or(DEFAULT_PATH.to_string());
 
     // Default to searching in start if nothing is specified
-    if ( args.location.contains(&"start".into()) | args.location.contains(&"anywhere".into()) | args.location.contains(&"end".into()) ) == false {
-        args.location.push(String::from("start"));
+    if (args.start | args.anywhere | args.end ) == false {
+        args.start = true;
     }
 
-    let placement = SearchPlacement {
-        start: args.location.contains(&String::from("start")),
-        anywhere: args.location.contains(&String::from("anywhere")),
-        end: args.location.contains(&String::from("end"))
-    };
+    // Collect search placement and inform user
+    let placement = SearchPlacement { start: args.start, anywhere: args.anywhere, end: args.end };
+    println!("Searching at: {placement}");
+
+    // Attempt to load first argument as json file
+    if let Ok(file) = File::open(&args.vanities.get(0).expect("Vanity vector must not be empty")) {
+        args.vanities = serde_json::from_reader::<_,Vec<String>>(&file)
+        .expect("Unable to parse pattern file. Json decoding failed");
+    }
 
     // Ensure all args are upper-case, print to user
     args.vanities.iter_mut().for_each(|s|{*s = s.to_uppercase()});
@@ -85,7 +108,7 @@ fn main() {
     let (saver_tx,saver_rx) = mpsc::channel::<AddressMatch>();
 
     // Create and configure worker threads
-    let mut worker_handles:Vec<_> = (0..args.threads).map(|id|{
+    let mut worker_handles:Vec<_> = (0..num_threads).map(|id|{
         let keep_alive = keep_alive.clone();
 
         let state_tx = state_tx.clone();
@@ -100,7 +123,7 @@ fn main() {
 
     let keep_alive_clone = keep_alive.clone();
     worker_handles.push(thread::spawn(move||{
-        thread_main_loop(state_rx,saver_tx,print_tx,args.vanities.clone(),args.once,keep_alive_clone,args.threads);
+        thread_main_loop(state_rx,saver_tx,print_tx,args.vanities.clone(),args.once,keep_alive_clone,num_threads);
         println!("Terminated thread [main_loop]")
     }));
 
@@ -111,7 +134,7 @@ fn main() {
     }));
 
     worker_handles.push(thread::spawn(move||{
-        thread_file_handler(saver_rx);
+        thread_file_handler(saver_rx,path);
         println!("Terminated thread [file_handler]")
     }));
 
@@ -165,7 +188,7 @@ fn thread_main_loop(
 
         match state_rx.recv_timeout(Duration::from_millis(100)) {
 
-            // Adrress match has been found
+            // Address match has been found
             Ok(WorkerMsg::AddressMatch(address_match)) => {
                 
                 fn transmit_match (match_count: &mut usize,saver_tx: &mpsc::Sender<AddressMatch>,print_tx: &mpsc::Sender<PrinterMsg>,address_match: AddressMatch) {
@@ -179,7 +202,7 @@ fn thread_main_loop(
                         transmit_match(&mut match_count,&saver_tx, &print_tx, address_match);
                         let _removed = targets.remove(index);
                         if targets.len() == 0 {
-                            println!("Found all vanitiy addresses!");
+                            println!("Found all vanity addresses!");
                             keep_alive.store(false,Ordering::Relaxed)
                         }
                     }
@@ -252,21 +275,31 @@ fn thread_info_printer(receiver : mpsc::Receiver<PrinterMsg>, keep_alive: Arc<At
 
         println!("\n\nStats for current session");
         println!("Timer: {}h:{:02}m:{:02}s",hrs,min,sec);
-        println!("Speed: {} a/s",info_state.search_rate);
-        println!("Total: {} million",info_state.total_count as f32 / 1e6);
+        println!("Speed: {:.0} a/s",info_state.search_rate);
+        println!("Total: {:.2} million",info_state.total_count as f32 / 1e6);
         println!("Match: {}",info_state.match_count);
 
         thread::sleep(Duration::from_secs(1));
     }
 }
 
-
-
 #[derive(Clone,Debug)]
 struct SearchPlacement {
     start:bool,
     anywhere:bool,
     end:bool,
+}
+
+impl Display for SearchPlacement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f,"{}",match (self.start,self.anywhere,self.end) {
+            (_, true, _) => "Anywhere",
+            (true, false, true) => "Start and end",
+            (true, false, false) => "Start",
+            (false, false, true) => "End",
+            (false, false, false) => "Nowhere"
+        })
+    }
 }
 
 /// Struct for when an address has matched a vanity string
@@ -286,13 +319,13 @@ enum Placement {
 }
 
 /// Threads to handle saving matches to json file
-fn thread_file_handler(receiver : mpsc::Receiver<AddressMatch>) {
+fn thread_file_handler(receiver : mpsc::Receiver<AddressMatch>, path:String) {
 
     // Load existing vanity json or create a new one
-    let mut matches = if let Ok(file) = File::open(DEFAULT_PATH) {
+    let mut matches = if let Ok(file) = File::open(&path) {
         serde_json::from_reader(&file).expect("Unable to parse existing file")
     } else {
-        let file = File::create(DEFAULT_PATH).expect("Unable to create new file");
+        let file = File::create(&path).expect("Unable to create new file");
         serde_json::to_writer(&file, &[0;0]).expect("Unable to write to file");
         Vec::new()
     };
@@ -304,7 +337,7 @@ fn thread_file_handler(receiver : mpsc::Receiver<AddressMatch>) {
         matches.append(& mut receiver.try_iter().collect());
 
         if let Ok(json_message) = serde_json::to_string_pretty(&matches) {
-            let mut file = File::create(DEFAULT_PATH).expect("Unable to open file as writeable");
+            let mut file = File::create(&path).expect("Unable to open file as writeable");
             write!(file,"{}", json_message.as_str()).expect("Unable to write json string to file");
         }
     }
