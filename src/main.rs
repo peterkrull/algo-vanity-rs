@@ -9,13 +9,15 @@ use std::{
 };
 
 use ctrlc;
-use clap::Parser;
 use serde_json;
+use clap::Parser;
+use rand::{Rng,thread_rng};
 use serde::{Serialize,Deserialize};
 use algo_rust_sdk::account::Account;
 
 /// Number of per-thread account checks between notifying main thread
-const COUNT_INTERVAL: usize = 10_000;
+const COUNT_PER_LOOP: usize = 100;
+const COUNT_INTERVAL: usize = COUNT_PER_LOOP*COUNT_PER_LOOP;
 
 /// Default file path to save vanity addresses to
 const DEFAULT_PATH: &str = "./vanities.json";
@@ -48,11 +50,11 @@ struct Cli {
     /// Look for match at end of address
     #[clap(short, long,default_value_t = false)]
     end: bool,
-    
+
     /// File path for saving vanity addresses
     #[clap(short, long)]
     path: Option<String>,
-    
+
     /// Exit after finding each vanity pattern once
     #[clap(short, long, default_value_t = false)]
     once: bool
@@ -77,7 +79,7 @@ fn main() {
     });
     println!("Running on {num_threads} threads");
 
-    // Default to searching in start if nothing is    
+    // Default to searching in start if nothing is
     let path = args.path.unwrap_or(DEFAULT_PATH.to_string());
 
     // Default to searching in start if nothing is specified
@@ -190,7 +192,7 @@ fn thread_main_loop(
 
             // Address match has been found
             Ok(WorkerMsg::AddressMatch(address_match)) => {
-                
+
                 fn transmit_match (match_count: &mut usize,saver_tx: &mpsc::Sender<AddressMatch>,print_tx: &mpsc::Sender<PrinterMsg>,address_match: AddressMatch) {
                     *match_count += 1;
                     saver_tx.send(address_match).expect("Unable to transmit address match from main thread");
@@ -225,6 +227,8 @@ fn thread_main_loop(
     }
 }
 
+
+
 fn thread_worker(
     id:usize,
     sender : mpsc::Sender<WorkerMsg>,
@@ -233,11 +237,28 @@ fn thread_worker(
     placement : SearchPlacement
 ) {
     let mut prev_time = Instant::now();
+    let mut rng = thread_rng();
     while keep_alive.load(Ordering::Relaxed) {
-        for _ in 0..COUNT_INTERVAL {
-            let acc = Account::generate();
-            find_vanity(&sender, &targets, &acc, &placement);
+
+        // This hack allows for only generating orders of magnitudes fewer random numbers.
+        // After generating the first seed, we generate two random numbers which represent
+        // two indeces of the seed. These indeces are counted up in the for loops to change
+        // the seed ever so slightly. For loops and counting is much faster than generating
+        // 32 new random numbers every time. The same perturbed seed is used COUNT_PER_LOOP^2
+        // times before a new seed is generated. By default this is 10_000 times.
+
+        let mut seed: [u8; 32] = rng.gen();
+        let index0: u8 = rng.gen_range(0..32);
+        let index1: u8 = rng.gen_range(0..32);
+        for _ in 0..COUNT_PER_LOOP {
+            seed[index0 as usize] = seed[index0 as usize].wrapping_add(1);
+            for _ in 0..COUNT_PER_LOOP {
+                seed[index1 as usize] = seed[index1 as usize].wrapping_add(1);
+                let acc = Account::from_seed(seed);
+                find_vanity(&sender, &targets, &acc, &placement);
+            }
         }
+
         let current_time = Instant::now();
         let duration = Instant::now().duration_since(prev_time);
         prev_time = current_time;
