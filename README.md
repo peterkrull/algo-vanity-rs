@@ -24,7 +24,7 @@ algo-vanity-rs vanity_list.json
 By default the tool will run indefinitely until interrupted by the user (Ctrl-C), automatically detect the number of available threads and only look for patterns in the beginning of the address. All of this can be configured, and is explained further in the `-h` prompt.
 
 ### How fast?
-Thanks to a random number generator (rng) hack, we can get away with generating significantly fewer random seeds. Instead of generating 32 bytes each iteration, we can generate just 32 once per 10000, iterations, and simply perturb a few of the seed indenes. This hack alone doubles the number of addresses/second on my machine, allowing me to reach 215k addresses/second on a 10+ year old i5-3570k. I think that is impressive. The Rust language is also to thank for this speed, due to its easy multi-threading workflow.
+Thanks to a random number generator (rng) hack, we can get away with generating significantly fewer random seeds. Instead of generating 32 bytes each iteration, we can generate just 32+2 bytes *once* per 10000 iterations, and simply perturb a few of the seed indices. This hack alone doubles the number of addresses/second on my machine, allowing me to reach 215k addresses/second on a 10+ year old i5-3570k. I think that is impressive. The Rust language is also to thank for this speed, and for its easy multi-threading workflow.
 
 ## Build from source
 
