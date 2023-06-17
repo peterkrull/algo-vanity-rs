@@ -97,9 +97,22 @@ fn main() {
         .expect("Unable to parse pattern file. Json decoding failed");
     }
 
-    // Ensure all args are upper-case, print to user
+    // Ensure all patterns are upper-case
     args.vanities.iter_mut().for_each(|s|{*s = s.to_uppercase()});
-    println!("Looking for strings:\n{:?}",args.vanities);
+
+    // Ensure all patterns are valid
+    let mut invalid_patterns = false;
+    let allowed_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    args.vanities.iter().for_each(|vanity|{
+        vanity.chars().into_iter().for_each(|c|{
+            if ! allowed_chars.contains(c) {
+                invalid_patterns = true;
+                println!("Pattern {vanity} contains '{c}' which can not exist in an Algorand Address")
+            }
+        })
+    });
+    if invalid_patterns { println!("Exiting due to invalid pattern(s)"); return }
+    println!("Looking for patterns:\n{:?}",args.vanities);
 
     // Atomic boolean to keep worker threads alive
     let keep_alive = Arc::new(AtomicBool::new(true));
