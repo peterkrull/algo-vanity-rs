@@ -1,15 +1,14 @@
+#![feature(let_chains)]
+
 use std::{
     thread,
     fs::File,
     io::Write,
     fmt::Display,
-    num::NonZeroUsize,
     time::{Instant, Duration},
     sync::{Arc,mpsc,atomic::{AtomicBool, Ordering}},
 };
 
-use ctrlc;
-use serde_json;
 use clap::Parser;
 use rand::{Rng,thread_rng};
 use serde::{Serialize,Deserialize};
@@ -17,7 +16,6 @@ use algo_rust_sdk::account::Account;
 
 /// Number of per-thread account checks between notifying main thread
 const COUNT_PER_LOOP: usize = 100;
-const COUNT_INTERVAL: usize = COUNT_PER_LOOP*COUNT_PER_LOOP;
 
 /// Default file path to save vanity addresses to
 const DEFAULT_PATH: &str = "./vanities.json";
@@ -27,6 +25,56 @@ const MAX_THREADS: usize = 128;
 
 // Default number of threads if auto detect fails
 const DEFAULT_THREADS: usize = 4;
+
+/// Message types that can be sent to info printer thread
+enum PrinterMsg {
+    SearchRate(f32),
+    TotalCount(usize),
+    MatchCount(usize),
+}
+
+/// Message types worker theads send back to the main thread loop
+enum WorkerMsg {
+    AddressMatch(AddressMatch),
+    Count((usize,Duration))
+}
+
+/// Struct for when an address has matched a vanity string
+#[derive(Serialize,Deserialize)]
+struct AddressMatch {
+    target : String,
+    public : String,
+    mnemonic : String,
+    placement : Placement
+}
+
+/// Placement of matched string pattern
+#[derive(Serialize,Deserialize)]
+enum Placement {
+    Start,
+    Anywhere(usize),
+    End,
+}
+
+/// Places to search in addresses
+#[derive(Clone,Debug)]
+struct SearchPlacement {
+    start:bool,
+    anywhere:bool,
+    end:bool,
+}
+
+impl Display for SearchPlacement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f,"{}",match (self.start,self.anywhere,self.end) {
+            (_, true, _) => "Anywhere",
+            (true, false, true) => "Start and end",
+            (true, false, false) => "Start",
+            (false, false, true) => "End",
+            (false, false, false) => "Nowhere"
+        })
+    }
+}
 
 // Command line arguments.
 #[derive(Parser,Debug)]
@@ -40,15 +88,15 @@ struct Cli {
     threads: Option<usize>,
 
     /// Look for match at start of address (default)
-    #[clap(short, long,default_value_t = false)]
+    #[clap(short, long, default_value_t = false)]
     start: bool,
 
     /// Look for match anywhere in address
-    #[clap(short, long,default_value_t = false)]
+    #[clap(short, long, default_value_t = false)]
     anywhere: bool,
 
     /// Look for match at end of address
-    #[clap(short, long,default_value_t = false)]
+    #[clap(short, long, default_value_t = false)]
     end: bool,
 
     /// File path for saving vanity addresses
@@ -64,37 +112,32 @@ fn main() {
 
     let mut args = Cli::parse();
 
-    if let Some(t) = args.threads {
-        if t > MAX_THREADS {
-            println!("{t} threads seems a bit excessive. Perhaps fewer could do?");
-            return;
-        }
+    // Check for realistic number of threads
+    if let Some(t @ MAX_THREADS..) = args.threads {
+        println!("Error: User requested {t} threads, please select fewer than {MAX_THREADS}"); return
     }
 
-    // Determine number of threads to use, print to user
+    // Number of threads to use: cli arg > num cpus > default value
     let num_threads = args.threads.unwrap_or_else(||{
-        thread::available_parallelism().unwrap_or_else(|_e|{
-            NonZeroUsize::new(DEFAULT_THREADS).expect("You may perceive this error as a threat")
-        }).get()
+        thread::available_parallelism().map_or(DEFAULT_THREADS, |t|t.get())
     });
-    println!("Running on {num_threads} threads");
-
-    // Default to searching in start if nothing is
-    let path = args.path.unwrap_or(DEFAULT_PATH.to_string());
+    
+    // String representing path for saving vanities
+    let save_path = args.path.unwrap_or(DEFAULT_PATH.to_string());
 
     // Default to searching in start if nothing is specified
-    if (args.start | args.anywhere | args.end ) == false {
+    if !(args.start | args.anywhere | args.end ) {
         args.start = true;
     }
 
     // Collect search placement and inform user
     let placement = SearchPlacement { start: args.start, anywhere: args.anywhere, end: args.end };
-    println!("Searching at: {placement}");
 
     // Attempt to load first argument as json file
-    if let Ok(file) = File::open(&args.vanities.get(0).expect("Vanity vector must not be empty")) {
-        args.vanities = serde_json::from_reader::<_,Vec<String>>(&file)
-        .expect("Unable to parse pattern file. Json decoding failed");
+    let file_name = args.vanities.first().expect("Clap struct entry 'vanities' is must contain one or more elements.");
+    if let Ok(file) = File::open(file_name) {
+        args.vanities = if let Ok(vanities_from_file) = serde_json::from_reader::<_,Vec<String>>(&file) { vanities_from_file }
+        else { println!("Error: Unable to parse file as valid JSON of correct format, e.g. [\"algo\",\"rand\"]"); return }
     }
 
     // Ensure all patterns are upper-case
@@ -103,53 +146,55 @@ fn main() {
     // Ensure all patterns are valid
     let mut invalid_patterns = false;
     let allowed_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-    args.vanities.iter().for_each(|vanity|{
-        vanity.chars().into_iter().for_each(|c|{
-            if ! allowed_chars.contains(c) {
-                invalid_patterns = true;
-                println!("Pattern {vanity} contains '{c}' which can not exist in an Algorand Address")
-            }
-        })
-    });
-    if invalid_patterns { println!("Exiting due to invalid pattern(s)"); return }
+    args.vanities.iter().for_each(|vanity|{vanity.chars().for_each(|c|{
+        if ! allowed_chars.contains(c) {
+            invalid_patterns = true;
+            println!("Pattern {vanity} contains '{c}' which can not exist in an Algorand Address")
+        }
+    })});
+    if invalid_patterns { println!("Error: Exiting due to invalid pattern(s)"); return }
+
+    // Print summary
+    println!("Running on {num_threads} threads");
+    println!("Searching at: {placement}");
     println!("Looking for patterns:\n{:?}",args.vanities);
 
     // Atomic boolean to keep worker threads alive
     let keep_alive = Arc::new(AtomicBool::new(true));
 
     // Setup communication channels between threads
-    let (state_tx,state_rx) = mpsc::channel::<WorkerMsg>();
-    let (print_tx,print_rx) = mpsc::channel::<PrinterMsg>();
-    let (saver_tx,saver_rx) = mpsc::channel::<AddressMatch>();
+    let (tx_worker_msg,rx_worker_msg) = mpsc::channel::<WorkerMsg>();
+    let (tx_printer_msg,rx_printer_msg) = mpsc::channel::<PrinterMsg>();
+    let (tx_address_match,rx_address_match) = mpsc::channel::<AddressMatch>();
 
-    // Create and configure worker threads
-    let mut worker_handles:Vec<_> = (0..num_threads).map(|id|{
+    // Configure and create threads
+    let mut thread_handles:Vec<_> = (0..num_threads).map(|thread_id|{
         let keep_alive = keep_alive.clone();
 
-        let state_tx = state_tx.clone();
-        let targets = args.vanities.clone();
+        let tx_worker_msg = tx_worker_msg.clone();
+        let vanity_targets = args.vanities.clone();
         let placement = placement.clone();
 
         thread::spawn(move || {
-            thread_worker(id,state_tx,targets,keep_alive,placement);
-            println!("Terminated thread [worker {}]",id)
+            thread_worker(thread_id,tx_worker_msg,vanity_targets, keep_alive, placement);
+            println!("Terminated thread [worker {}]",thread_id)
         })
     }).collect();
 
     let keep_alive_clone = keep_alive.clone();
-    worker_handles.push(thread::spawn(move||{
-        thread_main_loop(state_rx,saver_tx,print_tx,args.vanities.clone(),args.once,keep_alive_clone,num_threads);
+    thread_handles.push(thread::spawn(move||{
+        thread_main_loop(rx_worker_msg, tx_address_match, tx_printer_msg, args.vanities.clone(), args.once, keep_alive_clone, num_threads);
         println!("Terminated thread [main_loop]")
     }));
 
     let keep_alive_clone = keep_alive.clone();
-    worker_handles.push(thread::spawn(move||{
-        thread_info_printer(print_rx, keep_alive_clone);
+    thread_handles.push(thread::spawn(move||{
+        thread_info_printer(rx_printer_msg, keep_alive_clone);
         println!("Terminated thread [info_printer]")
     }));
 
-    worker_handles.push(thread::spawn(move||{
-        thread_file_handler(saver_rx,path);
+    thread_handles.push(thread::spawn(move||{
+        thread_file_handler(rx_address_match, save_path);
         println!("Terminated thread [file_handler]")
     }));
 
@@ -159,41 +204,22 @@ fn main() {
         println!("Keyboard interrupt, exiting");
     }).expect("Error setting Ctrl-C handler");
 
-
     // Wait for all threads to finish
-    for handle in worker_handles {
-        let _ = handle.join();
+    for handle in thread_handles {
+        _ = handle.join();
     }
 
     println!("Exited gracefully")
 }
 
-enum PrinterMsg {
-    SearchRate(f32),
-    TotalCount(usize),
-    MatchCount(usize),
-}
-
-struct PrinterInfo {
-    time:Duration,
-    search_rate:f32,
-    total_count:usize,
-    match_count:usize,
-}
-
-enum WorkerMsg {
-    AddressMatch(AddressMatch),
-    Count((usize,Duration))
-}
-
 fn thread_main_loop(
-    state_rx : mpsc::Receiver<WorkerMsg>,
-    saver_tx : mpsc::Sender<AddressMatch>,
-    print_tx : mpsc::Sender<PrinterMsg>,
-    mut targets : Vec<String>,
-    once : bool,
+    rx_worker_msg: mpsc::Receiver<WorkerMsg>,
+    tx_address_match: mpsc::Sender<AddressMatch>,
+    tx_printer_msg: mpsc::Sender<PrinterMsg>,
+    mut vanity_targets: Vec<String>,
+    find_only_once: bool,
     keep_alive: Arc<AtomicBool>,
-    num_threads:usize
+    num_threads: usize
 ) {
     let mut total_count = 0;
     let mut match_count = 0;
@@ -201,53 +227,55 @@ fn thread_main_loop(
     let mut rates = vec![0.0;num_threads];
     while keep_alive.load(Ordering::Relaxed) {
 
-        match state_rx.recv_timeout(Duration::from_millis(100)) {
+        if let Ok(msg) = rx_worker_msg.recv() {
 
-            // Address match has been found
-            Ok(WorkerMsg::AddressMatch(address_match)) => {
+            match msg {
 
-                fn transmit_match (match_count: &mut usize,saver_tx: &mpsc::Sender<AddressMatch>,print_tx: &mpsc::Sender<PrinterMsg>,address_match: AddressMatch) {
-                    *match_count += 1;
-                    saver_tx.send(address_match).expect("Unable to transmit address match from main thread");
-                    print_tx.send(PrinterMsg::MatchCount(*match_count)).expect("Unable to transmit match count from main thread");
-                }
+                // Address match has been found
+                WorkerMsg::AddressMatch(address_match) => {
 
-                if once {
-                    if let Some(index) = targets.iter().position(|r| r == &address_match.target)  {
-                        transmit_match(&mut match_count,&saver_tx, &print_tx, address_match);
-                        let _removed = targets.remove(index);
-                        if targets.len() == 0 {
-                            println!("Found all vanity addresses!");
-                            keep_alive.store(false,Ordering::Relaxed)
-                        }
+                    fn transmit_match (match_count: &mut usize,tx_address_match: &mpsc::Sender<AddressMatch>, tx_printer_msg: &mpsc::Sender<PrinterMsg>, address_match: AddressMatch) {
+                        *match_count += 1;
+                        tx_address_match.send(address_match).expect("Unable to transmit address match from main thread");
+                        tx_printer_msg.send(PrinterMsg::MatchCount(*match_count)).expect("Unable to transmit match count from main thread");
                     }
-                } else {
-                    transmit_match(&mut match_count,&saver_tx,&print_tx, address_match);
-                }
 
-            },
+                    if find_only_once {
+                        if let Some(index) = vanity_targets.iter().position(|r| r == &address_match.target)  {
+                            transmit_match(&mut match_count,&tx_address_match, &tx_printer_msg, address_match);
+                            let _removed = vanity_targets.remove(index);
+                            if vanity_targets.is_empty() {
+                                println!("Found all vanity addresses!");
+                                keep_alive.store(false,Ordering::Relaxed)
+                            }
+                        }
+                    } else {
+                        transmit_match(&mut match_count,&tx_address_match,&tx_printer_msg, address_match);
+                    }
 
-            // Worker thread counting update
-            Ok(WorkerMsg::Count((id,duration))) => {
-                total_count += COUNT_INTERVAL;
-                rates[id] = COUNT_INTERVAL as f32 / duration.as_secs_f32();
-                search_rate = search_rate*0.95 + rates.iter().sum::<f32>()*0.05;
-                print_tx.send(PrinterMsg::SearchRate(search_rate)).expect("Unable to transmit rate from main thread");
-                print_tx.send(PrinterMsg::TotalCount(total_count)).expect("Unable to transmit total count from main thread");
-            },
-            _ => {}
+                },
+
+                // Worker thread counting update
+                WorkerMsg::Count((id,duration)) => {
+                    total_count += COUNT_PER_LOOP * COUNT_PER_LOOP ;
+                    rates[id] = (COUNT_PER_LOOP * COUNT_PER_LOOP) as f32 / duration.as_secs_f32();
+                    search_rate = search_rate*0.95 + rates.iter().sum::<f32>()*0.05; // LP-filtered rate
+                    tx_printer_msg.send(PrinterMsg::SearchRate(search_rate)).expect("Unable to transmit rate from main thread");
+                    tx_printer_msg.send(PrinterMsg::TotalCount(total_count)).expect("Unable to transmit total count from main thread");
+                },
+            }
+        } else {
+            break;
         }
     }
 }
 
-
-
 fn thread_worker(
-    id:usize,
-    sender : mpsc::Sender<WorkerMsg>,
-    targets : Vec<String>,
+    thread_id: usize,
+    tx_worker_msg: mpsc::Sender<WorkerMsg>,
+    vanity_targets: Vec<String>,
     keep_alive: Arc<AtomicBool>,
-    placement : SearchPlacement
+    placement: SearchPlacement
 ) {
     let mut prev_time = Instant::now();
     let mut rng = thread_rng();
@@ -268,92 +296,58 @@ fn thread_worker(
             for _ in 0..COUNT_PER_LOOP {
                 seed[index1 as usize] = seed[index1 as usize].wrapping_add(1);
                 let acc = Account::from_seed(seed);
-                find_vanity(&sender, &targets, &acc, &placement);
+                find_vanity(&tx_worker_msg, &vanity_targets, &acc, &placement);
             }
         }
 
         let current_time = Instant::now();
         let duration = Instant::now().duration_since(prev_time);
         prev_time = current_time;
-        let _ = sender.send(WorkerMsg::Count((id,duration)));
+        _ = tx_worker_msg.send(WorkerMsg::Count((thread_id,duration)));
     }
 }
 
-fn thread_info_printer(receiver : mpsc::Receiver<PrinterMsg>, keep_alive: Arc<AtomicBool>) {
+fn thread_info_printer(
+    rx_printer_msg: mpsc::Receiver<PrinterMsg>,
+    keep_alive: Arc<AtomicBool>
+) {
 
     let start_time = Instant::now();
 
-    let mut info_state = PrinterInfo {
-        time: Duration::default(),
-        search_rate: 0.0,
-        total_count: 0,
-        match_count: 0,
-    };
+    let mut time: Duration;
+    let mut search_rate = 0.0;
+    let mut total_count = 0;
+    let mut match_count = 0;
 
     while keep_alive.load(Ordering::Relaxed) {
 
         // Receive all updated values before printing
-        while let Ok(message) = receiver.try_recv() {
+        while let Ok(message) = rx_printer_msg.try_recv() {
             match message {
-                PrinterMsg::SearchRate(v) => info_state.search_rate = v,
-                PrinterMsg::TotalCount(v) => info_state.total_count = v,
-                PrinterMsg::MatchCount(v) => info_state.match_count = v,
+                PrinterMsg::SearchRate(v) => search_rate = v,
+                PrinterMsg::TotalCount(v) => total_count = v,
+                PrinterMsg::MatchCount(v) => match_count = v,
             }
         }
 
-        info_state.time = Instant::now().duration_since(start_time);
+        time = Instant::now().duration_since(start_time);
 
-        let sec = info_state.time.as_secs() % 60;
-        let min = (info_state.time.as_secs() / 60) % 60;
-        let hrs = (info_state.time.as_secs() / 60) / 60;
+        let sec = time.as_secs() % 60;
+        let min = (time.as_secs() / 60) % 60;
+        let hrs = (time.as_secs() / 60) / 60;
 
         println!("\n\nStats for current session");
         println!("Timer: {}h:{:02}m:{:02}s",hrs,min,sec);
-        println!("Speed: {:.0} a/s",info_state.search_rate);
-        println!("Total: {:.2} million",info_state.total_count as f32 / 1e6);
-        println!("Match: {}",info_state.match_count);
+        println!("Speed: {:.0} a/s",search_rate);
+        println!("Total: {:.2} million",total_count as f32 / 1e6);
+        println!("Match: {}",match_count);
 
         thread::sleep(Duration::from_secs(1));
     }
 }
 
-#[derive(Clone,Debug)]
-struct SearchPlacement {
-    start:bool,
-    anywhere:bool,
-    end:bool,
-}
-
-impl Display for SearchPlacement {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f,"{}",match (self.start,self.anywhere,self.end) {
-            (_, true, _) => "Anywhere",
-            (true, false, true) => "Start and end",
-            (true, false, false) => "Start",
-            (false, false, true) => "End",
-            (false, false, false) => "Nowhere"
-        })
-    }
-}
-
-/// Struct for when an address has matched a vanity string
-#[derive(Serialize,Deserialize)]
-struct AddressMatch {
-    target : String,
-    public : String,
-    mnemonic : String,
-    placement : Placement
-}
-
-#[derive(Serialize,Deserialize)]
-enum Placement {
-    Anywhere(usize),
-    Start,
-    End,
-}
-
 /// Threads to handle saving matches to json file
-fn thread_file_handler(receiver : mpsc::Receiver<AddressMatch>, path:String) {
+fn thread_file_handler(rx_address_match: mpsc::Receiver<AddressMatch>, path: String) {
 
     // Load existing vanity json or create a new one
     let mut matches = if let Ok(file) = File::open(&path) {
@@ -365,27 +359,27 @@ fn thread_file_handler(receiver : mpsc::Receiver<AddressMatch>, path:String) {
     };
 
     // Receive new address match, add it to vector and save to disk
-    while let Ok(message) = receiver.recv() {
+<    while let Ok(message) = rx_address_match.recv() {
 
         matches.push(message);
-        matches.append(& mut receiver.try_iter().collect());
+        matches.append(& mut rx_address_match.try_iter().collect());
 
         if let Ok(json_message) = serde_json::to_string_pretty(&matches) {
             let mut file = File::create(&path).expect("Unable to open file as writeable");
             write!(file,"{}", json_message.as_str()).expect("Unable to write json string to file");
         }
-    }
+    }>
 }
 
-fn find_vanity(sender : &mpsc::Sender<WorkerMsg>,targets : &Vec<String>,acc : &Account, placement : &SearchPlacement ) {
+fn find_vanity(tx_worker_msg: &mpsc::Sender<WorkerMsg>, vanity_targets: &Vec<String>, acc: &Account, placement: &SearchPlacement ) {
     let acc_string = acc.address().encode_string();
-    for target in targets {
+    for target in vanity_targets {
 
         let mut matched_start_end = false;
 
         // Look for match at start of address
         if placement.start && acc_string.starts_with(target.as_str()) {
-            let _ = sender.send(
+            _ = tx_worker_msg.send(
                 WorkerMsg::AddressMatch(AddressMatch {
                     target: target.clone(),
                     public: acc_string.clone(),
@@ -398,7 +392,7 @@ fn find_vanity(sender : &mpsc::Sender<WorkerMsg>,targets : &Vec<String>,acc : &A
 
         // Look for match at end of address
         if placement.end && acc_string.ends_with(target.as_str()) {
-            let _ = sender.send(
+            _ = tx_worker_msg.send(
                 WorkerMsg::AddressMatch(AddressMatch {
                     target: target.clone(),
                     public: acc_string.clone(),
@@ -410,9 +404,9 @@ fn find_vanity(sender : &mpsc::Sender<WorkerMsg>,targets : &Vec<String>,acc : &A
         }
 
         // Look for match anywhere in address
-        if matched_start_end == false && placement.anywhere {
+        if !matched_start_end && placement.anywhere {
             if let Some(index) = acc_string.find(target.as_str()) {
-                let _ = sender.send(
+                _ = tx_worker_msg.send(
                     WorkerMsg::AddressMatch(AddressMatch {
                         target: target.clone(),
                         public: acc_string.clone(),
