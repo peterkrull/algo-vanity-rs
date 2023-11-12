@@ -347,7 +347,10 @@ fn thread_info_printer(
 }
 
 /// Threads to handle saving matches to json file
-fn thread_file_handler(rx_address_match: mpsc::Receiver<AddressMatch>, path: String) {
+fn thread_file_handler(
+    rx_address_match: mpsc::Receiver<AddressMatch>,
+    path: String
+) {
 
     // Load existing vanity json or create a new one
     let mut matches = if let Ok(file) = File::open(&path) {
@@ -359,7 +362,7 @@ fn thread_file_handler(rx_address_match: mpsc::Receiver<AddressMatch>, path: Str
     };
 
     // Receive new address match, add it to vector and save to disk
-<    while let Ok(message) = rx_address_match.recv() {
+    while let Ok(message) = rx_address_match.recv() {
 
         matches.push(message);
         matches.append(& mut rx_address_match.try_iter().collect());
@@ -368,10 +371,15 @@ fn thread_file_handler(rx_address_match: mpsc::Receiver<AddressMatch>, path: Str
             let mut file = File::create(&path).expect("Unable to open file as writeable");
             write!(file,"{}", json_message.as_str()).expect("Unable to write json string to file");
         }
-    }>
+    }
 }
 
-fn find_vanity(tx_worker_msg: &mpsc::Sender<WorkerMsg>, vanity_targets: &Vec<String>, acc: &Account, placement: &SearchPlacement ) {
+fn find_vanity(
+    tx_worker_msg: &mpsc::Sender<WorkerMsg>,
+    vanity_targets: &Vec<String>,
+    acc: &Account,
+    placement: &SearchPlacement
+) {
     let acc_string = acc.address().encode_string();
     for target in vanity_targets {
 
