@@ -48,8 +48,9 @@ fn ui_function_2(frame: &mut Frame, state: &Arc<Mutex<GlobalState>>) {
             .direction(Direction::Vertical)
             .constraints(
                 [
-                    Constraint::Length(8),
-                    Constraint::Length(8),
+                    Constraint::Max(8),
+                    Constraint::Percentage(0),
+                    Constraint::Max(1)    
                 ])
             .split(frame.size());
 
@@ -109,9 +110,13 @@ fn ui_function_2(frame: &mut Frame, state: &Arc<Mutex<GlobalState>>) {
                 
             ).alignment(Alignment::Center);
 
+        let exit_message = Paragraph::new(Text::raw(" Press 'q' to exit "))
+            .add_modifier(Modifier::DIM);
+
         frame.render_widget(widget_stats, areas_top[0]);
         frame.render_widget(widget_config, areas_top[1]);
         frame.render_widget(widget_matches, areas[1]);
+        frame.render_widget(exit_message, areas[2]);
     }
 }
 
