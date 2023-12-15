@@ -1,24 +1,30 @@
 # Algorand Vanity Address Generator
 
-This command-line interface (CLI) tool is *guaranteed* the fastest tool to get you exactly the Algorand vanity address you want.
+This command-line interface (CLI) tool is *guaranteed* the fastest tool to get you exactly the Algorand vanity address you want, all while running securely on your local machine.
+
+<p align="center">
+  <img src="images/screenshot.png" />
+</p>
 
 Features include
 - Multi-threading, number of threads customizable by user
 - Search for one or more patterns at minimal performance penalty
 - Unlimited or once-per-pattern searching
 - Load list of pattern strings from json file
+- Simple terminal-based user interface
 - Automatically saves matching addresses to `vanities.json` file
 
 # Usage
 As the name suggests, a CLI tool is executed from the command-line. On linux it may be necessary to set the binary as executable in its properties. Open a terminal (or command prompt) in the same folder as the binary and type `./algo-vanity-rs -h` on Linux or `algo-vanity-rs -h` on Windows, which will run the binary and show the help prompt. Otherwise the using the tool is as simple as writing which patterns you want to look for, such as `algo-vanity-rs algo rand rocks` which will look for addresses which begin with `ALGO`, `RAND` and `ROCKS`.
 
 ```bash
-algo-vanity-rs algo rand rocks
+./algo-vanity-rs algo rand rocks
 ```
 
 Alternatively, it is possible to create a json file, containing a list of strings to use as patterns. This may be more convenient for some uses cases. For example, if a file named `vanity_list.json` exists in the same directory as the binary, and it contains `["algo","rand","rocks"]`, then executing the following command will give the same result as the previous command.
+
 ```bash
-algo-vanity-rs vanity_list.json
+./algo-vanity-rs vanity_list.json
 ```
 
 By default the tool will run indefinitely until interrupted by the user (Ctrl-C), automatically detect the number of available threads and only look for patterns in the beginning of the address. All of this can be configured, and is explained further in the `-h` prompt.
