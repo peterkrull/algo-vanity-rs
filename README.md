@@ -34,8 +34,7 @@ To build from source you will need the [Rust toolchain](https://rustup.rs/). Clo
 ## Download pre-compiled binaries
 For safety-reasons, it is recommended to build from source. However, pre-build binaries for x64 Linux and Windows platforms are provided under the `Releases` section of the repository. These releases are not guaranteed to be up to date.
 
-
-By default the tool will run indefinitely until interrupted by the user (Ctrl-C), automatically detect the number of available threads and only look for patterns in the beginning of the address. All of this can be configured, and is explained further in the `-h` prompt.
+By default the tool will run indefinitely until interrupted by the user, automatically detect the number of available threads and only look for patterns in the beginning of the address. All of this can be configured, and is explained further in the `-h` prompt.
 
 # How fast?
 Thanks to a random number generator (rng) hack, we can get away with generating significantly fewer random seeds. Instead of generating 32 bytes each iteration, we can generate just 32+2 bytes *once* per 10000 iterations, and simply perturb a few of the seed indices. This hack alone doubles the number of addresses/second on my machine, allowing me to reach 215k addresses/second on a 10+ year old i5-3570k. I think that is impressive. The Rust language is also to thank for this speed, and for its easy multi-threading workflow.
