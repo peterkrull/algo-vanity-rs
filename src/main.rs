@@ -184,7 +184,7 @@ fn main() {
 
         // Setup worker threads (num_threads of them)
         let mut thread_handles:Vec<_> = (0..num_threads).map(|thread_id|{
-            
+
             let tx_worker_msg_clone = tx_worker_msg.clone();
             let state_clone = state.clone();
             let keep_alive_clone = keep_alive.clone();
@@ -201,7 +201,7 @@ fn main() {
         let state_clone = state.clone();
         thread_handles.push(thread::spawn(move||{
             thread_main_loop(rx_worker_msg, tx_address_match, state_clone, args.once, keep_alive_clone);
-            println!("Terminated thread [main_loop]")
+            println!("Terminated thread [main loop]")
         }));
 
         // Setup file handler thread
@@ -211,7 +211,7 @@ fn main() {
                 keep_alive_clone.store(false,Ordering::Relaxed);
                 println!("Error: Unable to save vanity addresses to file: {}",e);
             }
-            println!("Terminated thread [file_handler]")
+            println!("Terminated thread [file handler]")
         }));
 
         // Setup user interface thread
@@ -220,8 +220,11 @@ fn main() {
         thread_handles.push(thread::spawn(move||{
             // Wait for other threads to start
             thread::sleep(Duration::from_millis(10));
-            _ = tui::main(&state_clone, keep_alive_clone);
-            println!("Terminated thread [info_printer]")
+            if let Err(e) = tui::main(&state_clone, keep_alive_clone.clone()) {
+                keep_alive_clone.store(false,Ordering::Relaxed);
+                println!("Error: Unable to start terminal ui: {}",e);
+            }
+            println!("Terminated thread [terminal ui]")
         }));
 
         // return thread handles
@@ -285,44 +288,6 @@ fn thread_main_loop(
     }
 }
 
-fn thread_worker(
-    thread_id: usize,
-    tx_worker_msg: mpsc::Sender<WorkerMsg>,
-    state: Arc<Mutex<GlobalState>>,
-    keep_alive: Arc<AtomicBool>,
-    placement: SearchPlacement
-) {
-    let mut prev_time = Instant::now();
-    let mut rng = thread_rng();
-    while keep_alive.load(Ordering::Relaxed) {
-
-        // This hack allows for only generating orders of magnitudes fewer random numbers.
-        // After generating the first seed, we generate two random numbers which represent
-        // two indeces of the seed. These indeces are counted up in the for loops to change
-        // the seed ever so slightly. For loops and counting is much faster than generating
-        // 32 new random numbers every time. The same perturbed seed is used COUNT_PER_LOOP^2
-        // times before a new seed is generated. By default this is 10_000 times.
-
-        let mut seed: [u8; 32] = rng.gen();
-        let index0: u8 = rng.gen_range(0..32);
-        let index1: u8 = rng.gen_range(0..32);
-        let vanity_targets = if let Ok(s) = state.lock() { s.vanities.clone() } else { return };
-        for _ in 0..COUNT_PER_LOOP {
-            seed[index0 as usize] = seed[index0 as usize].wrapping_add(3);
-            for _ in 0..COUNT_PER_LOOP {
-                seed[index1 as usize] = seed[index1 as usize].wrapping_add(3);
-                let acc = Account::from_seed(seed);
-                find_vanity(&tx_worker_msg, &vanity_targets, &acc, &placement);
-            }
-        }
-
-        let current_time = Instant::now();
-        let duration = Instant::now().duration_since(prev_time);
-        prev_time = current_time;
-        _ = tx_worker_msg.send(WorkerMsg::Count((thread_id,duration)));
-    }
-}
-
 /// Threads to handle saving matches to json file
 fn thread_file_handler(
     rx_address_match: mpsc::Receiver<AddressMatch>,
@@ -353,6 +318,46 @@ fn thread_file_handler(
     Ok(())
 }
 
+fn thread_worker(
+    thread_id: usize,
+    tx_worker_msg: mpsc::Sender<WorkerMsg>,
+    state: Arc<Mutex<GlobalState>>,
+    keep_alive: Arc<AtomicBool>,
+    placement: SearchPlacement
+) {
+    let mut prev_time = Instant::now();
+    let mut rng = thread_rng();
+    while keep_alive.load(Ordering::Relaxed) {
+
+        // This hack allows for only generating orders of magnitudes fewer random numbers.
+        // After generating the first seed, we generate two random numbers which represent
+        // two indeces of the seed. These indeces are counted up in the for loops to change
+        // the seed ever so slightly. For loops and counting is much faster than generating
+        // 32 new random numbers every time. The same perturbed seed is used COUNT_PER_LOOP^2
+        // times before a new seed is generated. By default this is 10_000 times.
+
+        let mut seed: [u8; 32] = rng.gen();
+        let index0 = rng.gen_range(0..32);
+        let index1 = rng.gen_range(0..32);
+        if index0 == index1 { continue } // Ensure indeces are different
+        let vanity_targets = if let Ok(s) = state.lock() { s.vanities.clone() } else { return };
+        let mut acc: Account;
+        for _ in 0..COUNT_PER_LOOP {
+            seed[index0] = seed[index0].wrapping_add(1);
+            for _ in 0..COUNT_PER_LOOP {
+                seed[index1] = seed[index1].wrapping_add(1);
+                acc = Account::from_seed(seed);
+                find_vanity(&tx_worker_msg, &vanity_targets, &acc, &placement);
+            }
+        }
+
+        let current_time = Instant::now();
+        let duration = Instant::now().duration_since(prev_time);
+        prev_time = current_time;
+        _ = tx_worker_msg.send(WorkerMsg::Count((thread_id,duration)));
+    }
+}
+
 fn find_vanity(
     tx_worker_msg: &mpsc::Sender<WorkerMsg>,
     vanity_targets: &Vec<String>,
@@ -365,7 +370,7 @@ fn find_vanity(
         let mut matched_start_end = false;
 
         // Look for match at start of address
-        if placement.start && acc_string.starts_with(target.as_str()) {
+        if placement.start && acc_string.starts_with(target) {
             _ = tx_worker_msg.send(
                 WorkerMsg::AddressMatch(AddressMatch {
                     target: target.clone(),
@@ -378,7 +383,7 @@ fn find_vanity(
         }
 
         // Look for match at end of address
-        if placement.end && acc_string.ends_with(target.as_str()) {
+        if placement.end && acc_string.ends_with(target) {
             _ = tx_worker_msg.send(
                 WorkerMsg::AddressMatch(AddressMatch {
                     target: target.clone(),
@@ -392,7 +397,7 @@ fn find_vanity(
 
         // Look for match anywhere in address
         if !matched_start_end && placement.anywhere {
-            if let Some(index) = acc_string.find(target.as_str()) {
+            if let Some(index) = acc_string.find(target) {
                 _ = tx_worker_msg.send(
                     WorkerMsg::AddressMatch(AddressMatch {
                         target: target.clone(),

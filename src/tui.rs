@@ -52,17 +52,25 @@ fn ui_function_2(frame: &mut Frame, state: &Arc<Mutex<GlobalState>>) {
                     Constraint::Percentage(0),
                     Constraint::Max(1)    
                 ])
+            .vertical_margin(1)
+            .horizontal_margin(2)
             .split(frame.size());
 
         let sec = s.run_time.as_secs() % 60;
         let min = (s.run_time.as_secs() / 60) % 60;
         let hrs = (s.run_time.as_secs() / 60) / 60;
 
+        let count_message = if s.total_count > 1_000_000_000 {
+            format!("Total: {:.2} billion", s.total_count as f32 / 1e9)
+        } else {
+            format!("Total: {:.2} million", s.total_count as f32 / 1e6)
+        };
+
         let stats_lines = vec![
             Line::raw(format!("Timer: {}h:{:02}m:{:02}s", hrs, min, sec)),
             Line::raw(format!("Speed: {:.0} a/s", s.search_rate)),
-            Line::raw(format!("Total: {:.2} million", s.total_count as f32 / 1e6)),
-            Line::raw(format!("Match: {}", s.match_count)),
+            Line::raw(count_message),
+            Line::raw(format!("Found: {} matches", s.match_count)),
         ];
 
         let config_lines = vec![
@@ -73,7 +81,7 @@ fn ui_function_2(frame: &mut Frame, state: &Arc<Mutex<GlobalState>>) {
             // Add more configuration details here...
         ];
 
-        let (matches, num_matches) = render_multiple_matches(&s, (areas[1].height.saturating_sub(4)).into());
+        let matches = matches_to_text(&s.matches, (areas[1].height.saturating_sub(4)).into());
 
         let areas_top = Layout::default()
             .direction(Direction::Horizontal)
@@ -100,14 +108,19 @@ fn ui_function_2(frame: &mut Frame, state: &Arc<Mutex<GlobalState>>) {
                 .borders(Borders::ALL)
             );
 
+        let title_matches = match matches.lines.len() {
+            0 => String::from(" Matches will appear here "),
+            1 => format!(" Last match "),
+            _ => format!(" Last {} matches ", matches.lines.len())
+        };
+
         let widget_matches = Paragraph::new(matches)
             .block(Block::default()
                 .borders(Borders::ALL)
                 .padding(Padding::new(3,3,1,1))
-                .title(format!(" Last {} matches ", num_matches))
+                .title(title_matches)
                 .title_style(Style::default().bold())
                 .title_alignment(Alignment::Center)
-                
             ).alignment(Alignment::Center);
 
         let exit_message = Paragraph::new(Text::raw(" Press 'q' to exit "))
@@ -120,62 +133,39 @@ fn ui_function_2(frame: &mut Frame, state: &Arc<Mutex<GlobalState>>) {
     }
 }
 
-fn render_multiple_matches(s: &GlobalState, lines: usize) -> (Text,usize) {
-    if s.matches.is_empty() {
-        (Text::raw("No matches yet, hang tight.."),0)
-    } else if s.matches.len() > lines  {
-        (Text::from(s.matches[s.matches.len()-lines..].iter().map(|m| render_stylized_match(m)).collect::<Vec<Line>>()),lines)
-    } else if lines > 0 {
-        (Text::from(s.matches.iter().map(|m| render_stylized_match(m)).collect::<Vec<Line>>()),s.matches.len())
-    } else {
-        (Text::raw(""),0)
-    }
-}
 
-/// Take a single address match and render it in a stylized way, where the matched section
-/// is highlighted in bold green, and the rest is regular white text. First 
-/// construct each span, and then construct the line from a vec of the spans.
-fn render_stylized_match(match_: &AddressMatch) -> Line {
-    let mut spans: Vec<Span<'_>> = Vec::new();
+fn match_to_line(m: &AddressMatch) -> Line {
+    // Calculate the start and end of the match
+    let (a, b) = match m.placement {
+        crate::Placement::Start => (0, m.target.len()),
+        crate::Placement::Anywhere(position) => (position, position + m.target.len()),
+        crate::Placement::End => (m.public.len() - m.target.len(), m.public.len()),
+    };
 
-    match match_.placement {
-        crate::Placement::Start => {
-            spans.push(Span::styled(
-                &match_.public[0..match_.target.len()],
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-            ));
-        
-            spans.push(Span::styled(
-                &match_.public[match_.target.len()..],
-                Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
-            ));
-        },
-        crate::Placement::Anywhere(position) => {
-            spans.push(Span::styled(
-                &match_.public[0..position],
-                Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
-            ));
-            spans.push(Span::styled(
-                &match_.public[position..position+match_.target.len()],
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::styled(
-                &match_.public[position+match_.target.len()..],
-                Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
-            ));
-        },
-        crate::Placement::End => {
-            spans.push(Span::styled(
-                &match_.public[0..match_.public.len()-match_.target.len()],
-                Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
-            ));
-            spans.push(Span::styled(
-                &match_.public[match_.public.len()-match_.target.len()..],
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-            ));
-        }
-    }
+    // Construct a span with the given text, color and modifier
+    let styled_span = |text: &str, color: Color, modifier: Modifier| {
+        Span::styled(text.to_owned(), Style::default().fg(color).add_modifier(modifier))
+    };
+
+    // Construct the line from the spans
+    let spans = vec![
+        styled_span(&m.public[ ..a], Color::Gray, Modifier::DIM),
+        styled_span(&m.public[a..b], Color::Green, Modifier::BOLD),
+        styled_span(&m.public[b.. ], Color::Gray, Modifier::DIM),
+    ];
 
     Line::from(spans)
 }
 
+fn matches_to_text(matches: &Vec<AddressMatch>, lines: usize) -> Text {
+
+    // If there are more matches than lines, only draw the last `lines` matches
+    let matches_to_draw = &matches[matches.len().saturating_sub(lines)..];
+
+    // Iterate over the matches and render them as lines of text
+    matches_to_draw
+        .iter()
+        .map(match_to_line)
+        .collect::<Vec<Line>>()
+        .into()
+}    
