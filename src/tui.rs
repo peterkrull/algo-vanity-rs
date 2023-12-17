@@ -5,6 +5,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen}
 };
 use ratatui::{prelude::*, widgets::*};
+use thousands::Separable;
 
 use crate::{GlobalState, AddressMatch};
 
@@ -68,7 +69,7 @@ fn ui_function(frame: &mut Frame, state: &Arc<Mutex<GlobalState>>) {
 
         let stats_lines = vec![
             Line::raw(format!("Timer: {}h:{:02}m:{:02}s", hrs, min, sec)),
-            Line::raw(format!("Speed: {:.0} a/s", s.search_rate)),
+            Line::raw(format!("Speed: {} a/s", (s.search_rate as usize).separate_with_commas())),
             Line::raw(count_message),
             Line::raw(format!("Found: {} matches", s.match_count)),
         ];
