@@ -19,7 +19,7 @@ pub fn main(
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
     while keep_alive.load(Ordering::Relaxed) {
-        terminal.draw(|frame|ui_function_2(frame, state))?;
+        terminal.draw(|frame|ui_function(frame, state))?;
         handle_events(&keep_alive)?;
     }
 
@@ -41,7 +41,7 @@ fn handle_events(keep_alive: &Arc<AtomicBool>) -> io::Result<()> {
     Ok(())
 }
 
-fn ui_function_2(frame: &mut Frame, state: &Arc<Mutex<GlobalState>>) {
+fn ui_function(frame: &mut Frame, state: &Arc<Mutex<GlobalState>>) {
     if let Ok(s) = state.lock() {
 
         let areas = Layout::new()
